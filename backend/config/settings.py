@@ -133,6 +133,11 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:3000',
     'https://eld-app-route.onrender.com/',
      'https://*.vercel.app',
+    "https://eld-route-pjl6ufjtp-blandine-umuhozas-projects.vercel.app",
+    "https://eld-app-route.onrender.com",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_ALL_ORIGINS = True
+
