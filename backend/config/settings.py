@@ -134,6 +134,7 @@ CORS_ALLOWED_ORIGINS = [
     'https://eld-app-route.onrender.com/',
     'https://*.vercel.app',
     "https://eld-route-pjl6ufjtp-blandine-umuhozas-projects.vercel.app",
+    "https://eld-route-anfrjxsxz-blandine-umuhozas-projects.vercel.app",
     "https://eld-app-route.onrender.com",
 ]
 
