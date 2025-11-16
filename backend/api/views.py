@@ -3,95 +3,174 @@ from rest_framework.response import Response
 from datetime import datetime, timedelta
 import requests
 import math
+import traceback
+import time
+
+# Global cache for geocoded addresses
+GEOCODE_CACHE = {}
 
 @api_view(['POST'])
 def calculate_route(request):
-    data = request.data
-    current_location = data.get('current_location')  # START point
-    pickup_location = data.get('pickup_location')
-    dropoff_location = data.get('dropoff_location')
-    end_location = data.get('end_location', current_location)  # END point (defaults to current if not provided)
-    current_cycle_used = float(data.get('current_cycle_used', 0))
-    
-    # HOS Rules
-    MAX_DRIVING_HOURS = 11
-    MAX_DUTY_HOURS = 14
-    REQUIRED_BREAK_AFTER = 8
-    BREAK_DURATION = 0.5
-    OFF_DUTY_REQUIRED = 10
-    MAX_CYCLE_HOURS = 70
-    
-    # Get route data with actual road geometry for all 4 points
-    route_data = get_complete_route(current_location, pickup_location, dropoff_location, end_location)
-    
-    if not route_data:
-        return Response({'error': 'Could not calculate route'}, status=400)
-    
-    total_distance = route_data['total_distance']  # in miles
-    total_duration = route_data['total_duration']  # in hours
-    
-    # Calculate stops with coordinates from actual route
-    stops = calculate_stops_on_route(
-        route_data['segments'],
-        total_distance,
-        current_cycle_used,
-        current_location,
-        pickup_location,
-        dropoff_location,
-        end_location,
-        MAX_DRIVING_HOURS,
-        REQUIRED_BREAK_AFTER,
-        BREAK_DURATION,
-        OFF_DUTY_REQUIRED
-    )
-    
-    # Generate ELD logs
-    eld_logs = generate_eld_logs(stops, total_distance, current_cycle_used)
-    
-    return Response({
-        'route': {
-            'total_distance': total_distance,
-            'total_duration': total_duration,
-            'segments': route_data['segments'],  # Multiple route segments
-            'main_points': route_data['main_points']  # Start, Pickup, Dropoff, End
-        },
-        'stops': stops,
-        'eld_logs': eld_logs,
-        'total_distance': round(total_distance, 2),
-        'total_duration': round(total_duration, 2)
-    })
+    try:
+        data = request.data
+        print(f"\n{'='*60}")
+        print(f"📥 RECEIVED REQUEST")
+        print(f"{'='*60}")
+        
+        current_location = data.get('current_location')
+        pickup_location = data.get('pickup_location')
+        dropoff_location = data.get('dropoff_location')
+        end_location = data.get('end_location', current_location)
+        current_cycle_used = float(data.get('current_cycle_used', 0))
+        
+        if not end_location or end_location.strip() == '':
+            end_location = current_location
+            print(f"ℹ️  Empty end_location, using current_location: {end_location}")
+        
+        print(f"\n📍 Locations:")
+        print(f"  Start: {current_location}")
+        print(f"  Pickup: {pickup_location}")
+        print(f"  Dropoff: {dropoff_location}")
+        print(f"  End: {end_location}")
+        print(f"  Cycle used: {current_cycle_used} hours")
+        
+        # HOS Rules
+        MAX_DRIVING_HOURS = 11
+        REQUIRED_BREAK_AFTER = 8
+        BREAK_DURATION = 0.5
+        OFF_DUTY_REQUIRED = 10
+        
+        print(f"\n🔄 Starting route calculation...")
+        route_data = get_complete_route(current_location, pickup_location, dropoff_location, end_location)
+        
+        if not route_data:
+            error_msg = 'Could not calculate route - geocoding or routing failed'
+            print(f"❌ ERROR: {error_msg}")
+            return Response({'error': error_msg}, status=400)
+        
+        print(f"✅ Route calculated successfully")
+        
+        total_distance = route_data['total_distance']
+        total_duration = route_data['total_duration']
+        
+        print(f"\n📊 Route Summary:")
+        print(f"  Total Distance: {total_distance:.1f} miles")
+        print(f"  Total Duration: {total_duration:.1f} hours")
+        print(f"  Segments: {len(route_data['segments'])}")
+        
+        # Calculate stops
+        print(f"\n🛑 Calculating stops...")
+        stops = calculate_stops_on_route(
+            route_data['segments'],
+            total_distance,
+            current_cycle_used,
+            current_location,
+            pickup_location,
+            dropoff_location,
+            end_location,
+            MAX_DRIVING_HOURS,
+            REQUIRED_BREAK_AFTER,
+            BREAK_DURATION,
+            OFF_DUTY_REQUIRED
+        )
+        
+        print(f"✅ Generated {len(stops)} stops")
+        
+        eld_logs = generate_eld_logs(stops, total_distance, current_cycle_used)
+        
+        response_data = {
+            'route': {
+                'total_distance': round(total_distance, 2),
+                'total_duration': round(total_duration, 2),
+                'segments': route_data['segments'],
+                'main_points': route_data['main_points']
+            },
+            'stops': stops,
+            'eld_logs': eld_logs,
+            'total_distance': round(total_distance, 2),
+            'total_duration': round(total_duration, 2)
+        }
+        
+        print(f"\n✅ SUCCESS - Sending response")
+        print(f"{'='*60}\n")
+        return Response(response_data)
+        
+    except Exception as e:
+        print(f"\n❌ CRITICAL ERROR in calculate_route:")
+        print(f"Error: {str(e)}")
+        traceback.print_exc()
+        return Response({'error': f'Server error: {str(e)}'}, status=500)
 
 
 def get_complete_route(start, pickup, dropoff, end):
-    """
-    Get complete route with 4 main points:
-    START → PICKUP → DROPOFF → END
-    Returns segments for each part of the journey
-    """
+    """Get complete route with 4 main points using cached geocoding"""
     try:
-        # Geocode all addresses
-        start_coords = geocode_address(start)
-        pickup_coords = geocode_address(pickup)
-        dropoff_coords = geocode_address(dropoff)
-        end_coords = geocode_address(end)
+        print(f"\n🌍 GEOCODING ADDRESSES (with caching)")
+        print(f"-" * 40)
         
-        if not all([start_coords, pickup_coords, dropoff_coords, end_coords]):
-            return None
+        # Collect unique addresses to geocode
+        addresses = {
+            'start': start,
+            'pickup': pickup,
+            'dropoff': dropoff,
+            'end': end
+        }
         
-        # Get three route segments:
-        # Segment 1: START → PICKUP
+        coords = {}
+        
+        # Geocode each unique address (with caching)
+        unique_addresses = set(addresses.values())
+        print(f"  Need to geocode {len(unique_addresses)} unique location(s)")
+        
+        for addr in unique_addresses:
+            if addr in GEOCODE_CACHE:
+                print(f"  📦 Using cached: {addr} -> {GEOCODE_CACHE[addr]}")
+                coords[addr] = GEOCODE_CACHE[addr]
+            else:
+                print(f"  🌐 Geocoding: {addr}")
+                result = geocode_address(addr)
+                if result:
+                    GEOCODE_CACHE[addr] = result
+                    coords[addr] = result
+                    print(f"  ✅ Success: {addr} -> {result}")
+                    # Only wait if we actually made a request
+                    if len(unique_addresses) > 1:
+                        time.sleep(1.2)  # Wait 1.2 seconds between requests
+                else:
+                    print(f"  ❌ Failed: {addr}")
+                    return None
+        
+        # Map coordinates to each location
+        start_coords = coords[start]
+        pickup_coords = coords[pickup]
+        dropoff_coords = coords[dropoff]
+        end_coords = coords[end]
+        
+        print(f"\n🛣️  GETTING ROUTE SEGMENTS")
+        print(f"-" * 40)
+        
+        # Get route segments
+        print(f"  Segment 1: START → PICKUP")
         segment1 = get_route_segment(start_coords, pickup_coords, "to_pickup")
+        if not segment1:
+            print(f"  ⚠️  OSRM failed, using fallback")
+            return get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords, start, pickup, dropoff, end)
+        print(f"  ✅ Segment 1: {segment1['distance']:.1f} miles")
         
-        # Segment 2: PICKUP → DROPOFF (main delivery route)
+        print(f"  Segment 2: PICKUP → DROPOFF")
         segment2 = get_route_segment(pickup_coords, dropoff_coords, "delivery")
+        if not segment2:
+            print(f"  ⚠️  OSRM failed, using fallback")
+            return get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords, start, pickup, dropoff, end)
+        print(f"  ✅ Segment 2: {segment2['distance']:.1f} miles")
         
-        # Segment 3: DROPOFF → END
+        print(f"  Segment 3: DROPOFF → END")
         segment3 = get_route_segment(dropoff_coords, end_coords, "return")
+        if not segment3:
+            print(f"  ⚠️  OSRM failed, using fallback")
+            return get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords, start, pickup, dropoff, end)
+        print(f"  ✅ Segment 3: {segment3['distance']:.1f} miles")
         
-        if not all([segment1, segment2, segment3]):
-            return get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords)
-        
-        # Calculate total distance and duration
         total_distance = segment1['distance'] + segment2['distance'] + segment3['distance']
         total_duration = segment1['duration'] + segment2['duration'] + segment3['duration']
         
@@ -108,38 +187,36 @@ def get_complete_route(start, pickup, dropoff, end):
         }
         
     except Exception as e:
-        print(f"Routing error: {e}")
+        print(f"❌ Error in get_complete_route: {e}")
+        traceback.print_exc()
         return None
 
 
 def get_route_segment(from_coords, to_coords, segment_type):
     """Get a single route segment using OSRM"""
     try:
-        # OSRM uses [lon, lat] format
         waypoints = f"{from_coords[1]},{from_coords[0]};{to_coords[1]},{to_coords[0]}"
-        
         osrm_url = f"http://router.project-osrm.org/route/v1/driving/{waypoints}"
+        
         params = {
             'overview': 'full',
-            'geometries': 'geojson',
-            'steps': 'true'
+            'geometries': 'geojson'
         }
         
-        response = requests.get(osrm_url, params=params, timeout=10)
+        print(f"    🌐 Calling OSRM...")
+        response = requests.get(osrm_url, params=params, timeout=25)
         data = response.json()
         
         if data.get('code') == 'Ok' and data.get('routes'):
             route = data['routes'][0]
             
-            # Extract geometry (convert from [lon, lat] to [lat, lon])
             geometry_coords = route['geometry']['coordinates']
             geometry = [[coord[1], coord[0]] for coord in geometry_coords]
             
-            # Distance in meters, convert to miles
             distance_miles = route['distance'] * 0.000621371
-            
-            # Duration in seconds, convert to hours
             duration_hours = route['duration'] / 3600
+            
+            print(f"    ✅ Got {len(geometry)} waypoints, {distance_miles:.1f} miles")
             
             return {
                 'type': segment_type,
@@ -150,20 +227,30 @@ def get_route_segment(from_coords, to_coords, segment_type):
                 'end': to_coords
             }
         else:
+            print(f"    ❌ OSRM returned: {data.get('code', 'Unknown error')}")
             return None
             
+    except requests.Timeout:
+        print(f"    ⏱️  OSRM timeout after 25 seconds")
+        return None
     except Exception as e:
-        print(f"Segment routing error: {e}")
+        print(f"    ❌ OSRM error: {e}")
         return None
 
 
-def get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords):
-    """Fallback route calculation if API fails"""
+def get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end_coords, start, pickup, dropoff, end):
+    """Fallback route calculation if OSRM fails"""
+    print(f"\n⚠️  USING FALLBACK ROUTING (straight lines)")
+    
     dist1 = calculate_distance(start_coords, pickup_coords) * 1.3
     dist2 = calculate_distance(pickup_coords, dropoff_coords) * 1.3
     dist3 = calculate_distance(dropoff_coords, end_coords) * 1.3
     
     total_distance = dist1 + dist2 + dist3
+    
+    print(f"  Segment 1: {dist1:.1f} miles")
+    print(f"  Segment 2: {dist2:.1f} miles")
+    print(f"  Segment 3: {dist3:.1f} miles")
     
     return {
         'total_distance': total_distance,
@@ -195,10 +282,10 @@ def get_fallback_complete_route(start_coords, pickup_coords, dropoff_coords, end
             }
         ],
         'main_points': {
-            'start': {'coords': start_coords, 'type': 'start'},
-            'pickup': {'coords': pickup_coords, 'type': 'pickup'},
-            'dropoff': {'coords': dropoff_coords, 'type': 'dropoff'},
-            'end': {'coords': end_coords, 'type': 'end'}
+            'start': {'coords': start_coords, 'name': start, 'type': 'start'},
+            'pickup': {'coords': pickup_coords, 'name': pickup, 'type': 'pickup'},
+            'dropoff': {'coords': dropoff_coords, 'name': dropoff, 'type': 'dropoff'},
+            'end': {'coords': end_coords, 'name': end, 'type': 'end'}
         }
     }
 
@@ -207,19 +294,18 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
                              start_location, pickup_location, dropoff_location, end_location,
                              MAX_DRIVING_HOURS, REQUIRED_BREAK_AFTER, 
                              BREAK_DURATION, OFF_DUTY_REQUIRED):
-    """Calculate stops along the actual route with all segments"""
+    """Calculate stops along the route"""
     stops = []
     current_hours = current_cycle_used
     hours_driven = 0
     distance_since_fuel = 0
     distance_covered = 0
     
-    # Combine all geometry points from segments
     all_geometry = []
     for segment in segments:
         all_geometry.extend(segment['geometry'])
     
-    # Add START point
+    # START
     stops.append({
         'type': 'Start',
         'location': start_location,
@@ -228,10 +314,8 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
         'coordinates': segments[0]['start']
     })
     
-    # Calculate distance to pickup
+    # PICKUP
     to_pickup_distance = segments[0]['distance']
-    
-    # Add pickup stop
     stops.append({
         'type': 'Pickup',
         'location': pickup_location,
@@ -245,12 +329,11 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
     hours_driven += segments[0]['duration']
     distance_since_fuel += to_pickup_distance
     
-    # Main delivery segment (Pickup → Dropoff)
+    # Main delivery segment
     delivery_distance = segments[1]['distance']
     segment_end = distance_covered + delivery_distance
     
-    while distance_covered < segment_end:
-        # Check if fuel stop needed
+    while distance_covered < segment_end - 50:
         if distance_since_fuel >= 1000:
             coords = get_coordinates_at_distance(all_geometry, distance_covered, total_distance)
             stops.append({
@@ -263,7 +346,6 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
             distance_since_fuel = 0
             current_hours += 0.5
         
-        # Check if break needed
         if hours_driven >= REQUIRED_BREAK_AFTER:
             coords = get_coordinates_at_distance(all_geometry, distance_covered, total_distance)
             stops.append({
@@ -275,7 +357,6 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
             })
             hours_driven = 0
         
-        # Check if daily rest needed
         if current_hours >= MAX_DRIVING_HOURS:
             coords = get_coordinates_at_distance(all_geometry, distance_covered, total_distance)
             stops.append({
@@ -288,7 +369,6 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
             current_hours = 0
             hours_driven = 0
         
-        # Drive segment
         drive_hours = min(2, (segment_end - distance_covered) / 60)
         drive_distance = drive_hours * 60
         
@@ -297,7 +377,7 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
         hours_driven += drive_hours
         distance_since_fuel += drive_distance
     
-    # Add dropoff stop
+    # DROPOFF
     distance_covered = to_pickup_distance + delivery_distance
     stops.append({
         'type': 'Dropoff',
@@ -307,15 +387,7 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
         'coordinates': segments[1]['end']
     })
     
-    # Return segment (Dropoff → End)
-    return_distance = segments[2]['distance']
-    segment_end = distance_covered + return_distance
-    
-    distance_covered += segments[2]['duration'] * 60
-    current_hours += segments[2]['duration']
-    hours_driven += segments[2]['duration']
-    
-    # Add END point
+    # END
     stops.append({
         'type': 'End',
         'location': end_location,
@@ -328,7 +400,7 @@ def calculate_stops_on_route(segments, total_distance, current_cycle_used,
 
 
 def get_coordinates_at_distance(geometry, target_distance, total_distance):
-    """Get coordinates at a specific distance along the route geometry"""
+    """Get coordinates at a specific distance along the route"""
     if not geometry or len(geometry) < 2:
         return geometry[0] if geometry else [0, 0]
     
@@ -339,33 +411,46 @@ def get_coordinates_at_distance(geometry, target_distance, total_distance):
 
 
 def geocode_address(address):
-    """Geocode address using Nominatim (free, no API key needed)"""
+    """Geocode address using Nominatim - returns coords or None"""
     try:
         url = "https://nominatim.openstreetmap.org/search"
         params = {
             'q': address,
             'format': 'json',
-            'limit': 1
+            'limit': 1,
+            'addressdetails': 1
         }
-        headers = {'User-Agent': 'ELD-Trucking-App/1.0'}
+        headers = {
+            'User-Agent': 'ELD-Trucking-App/1.0',
+            'Accept-Language': 'en'
+        }
         
-        response = requests.get(url, params=params, headers=headers, timeout=5)
-        data = response.json()
+        # Longer timeout
+        response = requests.get(url, params=params, headers=headers, timeout=20)
         
-        if data:
-            return [float(data[0]['lat']), float(data[0]['lon'])]
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                coords = [float(data[0]['lat']), float(data[0]['lon'])]
+                return coords
+        
+        print(f"    ⚠️  No results or error for: {address}")
+        return None
+            
+    except requests.Timeout:
+        print(f"    ⏱️  Timeout (20s) for: {address}")
         return None
     except Exception as e:
-        print(f"Geocoding error: {e}")
+        print(f"    ❌ Error for {address}: {e}")
         return None
 
 
 def calculate_distance(coord1, coord2):
-    """Calculate distance between two coordinates in miles"""
+    """Calculate distance between coordinates in miles"""
     lat1, lon1 = coord1
     lat2, lon2 = coord2
     
-    R = 3959  # Earth radius in miles
+    R = 3959
     
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -379,13 +464,13 @@ def calculate_distance(coord1, coord2):
 
 
 def generate_eld_logs(stops, total_distance, initial_cycle):
-    """Generate ELD log data"""
+    """Generate ELD logs"""
     logs = []
     current_time = datetime.now()
     current_hours = initial_cycle
     
-    for i, stop in enumerate(stops):
-        if stop['type'] not in ['Start', 'End']:  # Don't log start/end as separate entries
+    for stop in stops:
+        if stop['type'] not in ['Start', 'End']:
             log_entry = {
                 'date': current_time.strftime('%Y-%m-%d'),
                 'time': current_time.strftime('%H:%M'),
@@ -396,7 +481,6 @@ def generate_eld_logs(stops, total_distance, initial_cycle):
             }
             logs.append(log_entry)
         
-        # Update time for next entry
         current_time += timedelta(hours=stop['duration'])
         if 'Rest' not in stop['type'] and stop['type'] not in ['Start', 'End']:
             current_hours += stop['duration']
