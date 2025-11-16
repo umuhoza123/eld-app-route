@@ -39,7 +39,8 @@ def calculate_route(request):
         'type': 'Pickup',
         'location': pickup_location,
         'duration': 1,
-        'distance_from_start': 0
+        'distance_from_start': 0,
+        'coordinates': route_data['coordinates'][1]  # Pickup coordinates
     })
     
     hours_driven = 0
@@ -48,28 +49,55 @@ def calculate_route(request):
     while remaining_distance > 0:
         # Check if fuel stop needed
         if distance_since_fuel >= 1000:
+            distance_traveled = total_distance - remaining_distance
+            coords = interpolate_coordinates(
+                route_data['coordinates'][1],  # pickup
+                route_data['coordinates'][2],  # dropoff
+                distance_traveled,
+                calculate_distance(route_data['coordinates'][1], route_data['coordinates'][2]) * 1.3
+            )
             stops.append({
                 'type': 'Fuel Stop',
                 'duration': 0.5,
-                'distance_from_start': total_distance - remaining_distance
+                'distance_from_start': distance_traveled,
+                'coordinates': coords,
+                'location': f"En Route ({distance_traveled:.0f} mi)"
             })
             distance_since_fuel = 0
         
         # Check if break needed
         if hours_driven >= REQUIRED_BREAK_AFTER:
+            distance_traveled = total_distance - remaining_distance
+            coords = interpolate_coordinates(
+                route_data['coordinates'][1],
+                route_data['coordinates'][2],
+                distance_traveled,
+                calculate_distance(route_data['coordinates'][1], route_data['coordinates'][2]) * 1.3
+            )
             stops.append({
                 'type': '30-min Break',
                 'duration': BREAK_DURATION,
-                'distance_from_start': total_distance - remaining_distance
+                'distance_from_start': distance_traveled,
+                'coordinates': coords,
+                'location': f"En Route ({distance_traveled:.0f} mi)"
             })
             hours_driven = 0
         
         # Check if daily rest needed
         if current_hours >= MAX_DRIVING_HOURS:
+            distance_traveled = total_distance - remaining_distance
+            coords = interpolate_coordinates(
+                route_data['coordinates'][1],
+                route_data['coordinates'][2],
+                distance_traveled,
+                calculate_distance(route_data['coordinates'][1], route_data['coordinates'][2]) * 1.3
+            )
             stops.append({
                 'type': '10-hour Rest',
                 'duration': OFF_DUTY_REQUIRED,
-                'distance_from_start': total_distance - remaining_distance
+                'distance_from_start': distance_traveled,
+                'coordinates': coords,
+                'location': f"En Route ({distance_traveled:.0f} mi)"
             })
             current_hours = 0
             hours_driven = 0
@@ -86,7 +114,8 @@ def calculate_route(request):
         'type': 'Dropoff',
         'location': dropoff_location,
         'duration': 1,
-        'distance_from_start': total_distance
+        'distance_from_start': total_distance,
+        'coordinates': route_data['coordinates'][2]  # Dropoff coordinates
     })
     
     # Generate ELD logs
@@ -99,6 +128,24 @@ def calculate_route(request):
         'total_distance': round(total_distance, 2),
         'total_duration': round(total_duration, 2)
     })
+
+
+def interpolate_coordinates(start_coord, end_coord, distance_traveled, total_segment_distance):
+    """
+    Calculate coordinates at a specific distance along the route.
+    This is a simple linear interpolation between two points.
+    """
+    if total_segment_distance == 0:
+        return start_coord
+    
+    # Calculate the fraction of the journey completed
+    fraction = distance_traveled / total_segment_distance
+    
+    # Interpolate latitude and longitude
+    lat = start_coord[0] + (end_coord[0] - start_coord[0]) * fraction
+    lon = start_coord[1] + (end_coord[1] - start_coord[1]) * fraction
+    
+    return [lat, lon]
 
 
 def get_route_coordinates(current, pickup, dropoff):
